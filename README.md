@@ -1,6 +1,6 @@
 # Twelve Angry LLMs
 
-An extensible Python library for using LLMs as judges.
+An extensible Python library for creating and using LLMs as judges. This library provides a framework for defining different types of judges, from those that return a simple score to those that provide a detailed, descriptive evaluation. It's designed to be modular, allowing you to easily connect or use different LLM providers like OpenAI, Hugging Face, or your own local models.
 
 ## Installation
 
