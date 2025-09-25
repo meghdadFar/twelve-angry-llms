@@ -1,12 +1,18 @@
 # Twelve Angry LLMs
 
-An extensible Python library for creating and using LLMs as judges. This library provides a framework for defining different types of judges, from those that return a simple score to those that provide a detailed, descriptive evaluation. It's designed to be modular, allowing you to easily connect or use different LLM providers like OpenAI, Hugging Face, or your own local models.
+Build an LLM jury to measure agreement among multiple LLM judges across tasks:
+- Text generation (agreement via token overlap)
+- Classification (single- or multi-label agreement)
+- Ranking (agreement via rank correlation)
 
-<!-- [![PyPI version](https://badge.fury.io/py/twelve-angry-llms.svg)](https://badge.fury.io/py/twelve-angry-llms) -->
-<!-- [![Build Status](https://github.com/meghdadFar/twelve-angry-llms/actions/workflows/python-package.yml/badge.svg)](https://github.com/meghdadFar/twelve-angry-llms/actions/workflows/python-package.yml) -->
+Modular design:
+- Tasks: Generation, Classification, Ranking
+- Judge: prompts an LLM and normalizes outputs
+- Jury: orchestrates judges and computes agreement
+- LLMClient: plug any provider (OpenAI, HF, local), via a simple generate(prompt, ...) interface
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Code style: ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
-<!-- [![Python Version](https://img.shields.io/pypi/pyversions/twelve-angry-llms.svg)](https://pypi.org/project/twelve-angry-llms) -->
 
 ## Installation
 
@@ -14,27 +20,106 @@ An extensible Python library for creating and using LLMs as judges. This library
 pip install twelve-angry-llms
 ```
 
-## Usage
+## Quickstart
 
-Here's how to use the `DescriptiveJudge` with the `OpenAIProvider`:
+Below is a minimal, self-contained example using a tiny mock client. Replace the mock with your provider by implementing LLMClient.
 
 ```python
-from twelve_angry_llms.providers.openai import OpenAIProvider
-from twelve_angry_llms.judges.descriptive import DescriptiveJudge
+from twelve_angry_llms.tasks import GenerationTask, ClassificationTask, RankingTask
+from twelve_angry_llms.judge import Judge
+from twelve_angry_llms.jury import Jury
+from twelve_angry_llms.clients.base import LLMClient
 
-# Make sure to set the OPENAI_API_KEY environment variable
-openai_provider = OpenAIProvider()
-descriptive_judge = DescriptiveJudge(llm_provider=openai_provider)
+# Mock clients returning deterministic outputs for demonstration
+class FixedClient:
+    def __init__(self, text): self.text = text
+    def generate(self, prompt: str, **kwargs) -> str: return self.text
 
-result = descriptive_judge.evaluate(
-    generation="This is a test generation.",
-    reference="This is a test reference.",
-    context="This is a test context."
+# 1) Generation agreement (token Jaccard over pairwise outputs)
+gen_task = GenerationTask(input_text="Summarize: LLMs are used for many NLP tasks.")
+judges_gen = [
+    Judge("gpt-A", FixedClient("LLMs are widely used in NLP tasks.")),
+    Judge("gpt-B", FixedClient("Large language models power many NLP applications.")),
+    Judge("gpt-C", FixedClient("LLMs are used for various NLP tasks.")),
+]
+jury = Jury(judges_gen)
+gen_result = jury.evaluate(gen_task)
+print("Generation agreement:", gen_result.agreement)
+
+# 2) Classification agreement (single-label exact match)
+cls_task = ClassificationTask(
+    input_text="The service was quick and friendly.",
+    labels=["positive", "neutral", "negative"],
+    multi_label=False,
 )
+judges_cls = [
+    Judge("cls-A", FixedClient("positive")),
+    Judge("cls-B", FixedClient("positive")),
+    Judge("cls-C", FixedClient("neutral")),
+]
+print("Classification agreement:", Jury(judges_cls).evaluate(cls_task).agreement)
 
-print(result.evaluation)
+# 3) Ranking agreement (pairwise Spearman rho)
+rank_task = RankingTask(
+    items=["Alpha", "Beta", "Gamma"],
+    criteria="usefulness",
+)
+judges_rank = [
+    Judge("rank-A", FixedClient("Alpha\nBeta\nGamma")),
+    Judge("rank-B", FixedClient("Beta\nAlpha\nGamma")),
+    Judge("rank-C", FixedClient("Alpha\nGamma\nBeta")),
+]
+print("Ranking agreement:", Jury(judges_rank).evaluate(rank_task).agreement)
+```
+
+## API Overview
+
+- Tasks (twelve_angry_llms.tasks)
+  - GenerationTask(input_text: str, guidance: Optional[str] = None)
+  - ClassificationTask(input_text: str, labels: List[str], multi_label: bool = False)
+  - RankingTask(items: List[str], criteria: Optional[str] = None)
+
+- Judge (twelve_angry_llms.judge)
+  - Judge(name: str, client: LLMClient, temperature: float = 0.0)
+  - predict(task) -> JudgeOutput
+
+- Jury (twelve_angry_llms.jury)
+  - Jury(judges: List[Judge])
+  - evaluate(task) -> JuryResult
+    - JuryResult.agreement: float in [0, 1] (higher is better)
+    - JuryResult.outputs: per-judge raw/normalized outputs
+    - JuryResult.details: pairwise scores and extra info
+
+- LLMClient protocol (twelve_angry_llms.clients.base)
+  - generate(prompt: str, system: Optional[str] = None, **kwargs) -> str
+
+## Agreement Metrics (default)
+- Generation: average pairwise Jaccard similarity over token sets
+- Classification (single): average pairwise exact match
+- Classification (multi): average pairwise Jaccard over label sets
+- Ranking: average pairwise Spearman rank correlation (no ties)
+
+These are simple, dependency-free defaults. You can later swap in stronger metrics (e.g., Krippendorff’s alpha, Kendall’s tau-b, embedding similarity).
+
+## Using Your Own Provider
+
+Implement LLMClient and pass it to Judge.
+
+```python
+from twelve_angry_llms.clients.base import LLMClient
+
+class MyProvider(LLMClient):
+    def generate(self, prompt: str, system: str | None = None, **kwargs) -> str:
+        # call your model here and return the text
+        return "model output"
+
+# Judge("my-judge", MyProvider())
 ```
 
 ## Contributing
 
-Contributions are welcome! Please see the [Contributing Guide](CONTRIBUTING.md) for more information.
+Contributions are welcome! Please see CONTRIBUTING.md for guidelines.
+
+## License
+
+MIT
