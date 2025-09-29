@@ -4,27 +4,27 @@ from .tasks import GenerationTask, ClassificationTask, RankingTask, Task
 from .types import JudgeOutput
 
 class Judge:
-    def __init__(self, name: str, client: LLMClient, temperature: float = 0.0):
+    def __init__(self, name: str, client: LLMClient, settings: dict[str, Any]):
         self.name = name
         self.client = client
-        self.temperature = temperature
+        self.settings = settings
 
     def predict(self, task: Task) -> JudgeOutput:
         if isinstance(task, GenerationTask):
             prompt = self._prompt_generation(task)
-            raw = self.client.generate(prompt, temperature=self.temperature)
+            raw = self.client.generate(prompt, settings=self.settings)
             normalized = raw.strip()
             return JudgeOutput(judge=self.name, raw=raw, normalized=normalized)
 
         if isinstance(task, ClassificationTask):
             prompt = self._prompt_classification(task)
-            raw = self.client.generate(prompt, temperature=self.temperature)
+            raw = self.client.generate(prompt, settings=self.settings)
             normalized = self._parse_classification(raw, task.labels, task.multi_label)
             return JudgeOutput(judge=self.name, raw=raw, normalized=normalized)
 
         if isinstance(task, RankingTask):
             prompt = self._prompt_ranking(task)
-            raw = self.client.generate(prompt, temperature=self.temperature)
+            raw = self.client.generate(prompt, settings=self.settings)
             normalized = self._parse_ranking(raw, task.items)
             return JudgeOutput(judge=self.name, raw=raw, normalized=normalized)
 
