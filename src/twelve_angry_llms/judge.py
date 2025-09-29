@@ -1,7 +1,8 @@
 from typing import Any, List, Optional, Sequence, Set, Union
 from .clients.base import LLMClient
-from .tasks import GenerationTask, ClassificationTask, RankingTask, Task
 from .types import JudgeOutput
+import re
+import json
 
 class Judge:
     def __init__(self, name: str, client: LLMClient, settings: dict[str, Any]):
@@ -9,85 +10,166 @@ class Judge:
         self.client = client
         self.settings = settings
 
-    def predict(self, task: Task) -> JudgeOutput:
-        if isinstance(task, GenerationTask):
-            prompt = self._prompt_generation(task)
-            raw = self.client.generate(prompt, settings=self.settings)
-            normalized = raw.strip()
-            return JudgeOutput(judge=self.name, raw=raw, normalized=normalized)
+    # --- Public evaluation methods (consume already-produced outputs) ---
 
-        if isinstance(task, ClassificationTask):
-            prompt = self._prompt_classification(task)
-            raw = self.client.generate(prompt, settings=self.settings)
-            normalized = self._parse_classification(raw, task.labels, task.multi_label)
-            return JudgeOutput(judge=self.name, raw=raw, normalized=normalized)
+    def evaluate_generation(
+        self,
+        input_text: str,
+        candidate: str,
+        guidance: Optional[str] = None,
+        rubric: Optional[str] = None,
+    ) -> JudgeOutput:
+        prompt = self._build_generation_eval_prompt(input_text, candidate, guidance, rubric)
+        raw = self.client.generate(prompt, settings=self.settings)
+        normalized = self._extract_score_and_reason(raw)
+        return JudgeOutput(judge=self.name, raw=raw, normalized=normalized, reasoning=normalized.get("reasoning"))
 
-        if isinstance(task, RankingTask):
-            prompt = self._prompt_ranking(task)
-            raw = self.client.generate(prompt, settings=self.settings)
-            normalized = self._parse_ranking(raw, task.items)
-            return JudgeOutput(judge=self.name, raw=raw, normalized=normalized)
+    def evaluate_classification(
+        self,
+        input_text: str,
+        candidate_labels: Union[str, Sequence[str], Set[str]],
+        allowed_labels: Sequence[str],
+        multi_label: bool = False,
+        gold_labels: Optional[Sequence[str]] = None,
+    ) -> JudgeOutput:
+        if isinstance(candidate_labels, str):
+            cand_norm = {candidate_labels} if multi_label else candidate_labels
+        else:
+            cand_norm = set(candidate_labels) if multi_label else list(candidate_labels)[0]
+        prompt = self._build_classification_eval_prompt(
+            input_text=input_text,
+            candidate=cand_norm,
+            allowed=allowed_labels,
+            multi_label=multi_label,
+            gold=gold_labels,
+        )
+        raw = self.client.generate(prompt, settings=self.settings)
+        normalized = self._extract_score_and_reason(raw, extra={"candidate": cand_norm})
+        return JudgeOutput(judge=self.name, raw=raw, normalized=normalized, reasoning=normalized.get("reasoning"))
 
-        raise TypeError(f"Unsupported task type: {type(task)}")
+    def evaluate_ranking(
+        self,
+        items: Sequence[str],
+        candidate_ranking: Sequence[str],
+        criteria: Optional[str] = None,
+        gold_ranking: Optional[Sequence[str]] = None,
+    ) -> JudgeOutput:
+        prompt = self._build_ranking_eval_prompt(
+            items=list(items),
+            candidate=list(candidate_ranking),
+            criteria=criteria,
+            gold=list(gold_ranking) if gold_ranking else None,
+        )
+        raw = self.client.generate(prompt, settings=self.settings)
+        normalized = self._extract_score_and_reason(raw, extra={"candidate_ranking": list(candidate_ranking)})
+        return JudgeOutput(judge=self.name, raw=raw, normalized=normalized, reasoning=normalized.get("reasoning"))
 
-    def _prompt_generation(self, task: GenerationTask) -> str:
-        guidance = f"\nGuidance: {task.guidance}" if task.guidance else ""
+    # --- Prompt builders (evaluation, not generation) ---
+
+    def _build_generation_eval_prompt(
+        self,
+        input_text: str,
+        candidate: str,
+        guidance: Optional[str],
+        rubric: Optional[str],
+    ) -> str:
+        guidance_part = f"\nGuidance:\n{guidance}" if guidance else ""
+        rubric_part = f"\nRubric (use to justify score):\n{rubric}" if rubric else ""
         return (
-            "You are a careful assistant. Generate a helpful, concise response.\n"
-            f"Input:\n{task.input_text}\n{guidance}\n"
-            "Answer:\n"
+            "You are an impartial evaluator of a model's response.\n"
+            "Task Input:\n"
+            f"{input_text}\n"
+            f"{guidance_part}"
+            "\nCandidate Response:\n"
+            f"{candidate}\n"
+            f"{rubric_part}\n"
+            "Provide:\n"
+            "1. A score 0-10 (higher is better)\n"
+            "2. A concise reasoning\n"
+            "Respond in JSON with keys: score, reasoning.\n"
         )
 
-    def _prompt_classification(self, task: ClassificationTask) -> str:
-        choices = ", ".join(task.labels)
-        multi = "You may output multiple labels separated by commas." if task.multi_label else "Output exactly one label."
+    def _build_classification_eval_prompt(
+        self,
+        input_text: str,
+        candidate: Union[str, Set[str]],
+        allowed: Sequence[str],
+        multi_label: bool,
+        gold: Optional[Sequence[str]],
+    ) -> str:
+        gold_part = f"\nGold Label(s): {list(gold)}" if gold else ""
+        cand_display = list(candidate) if isinstance(candidate, set) else candidate
         return (
-            "Classify the input into the provided labels.\n"
-            f"Labels: {choices}\n{multi}\n"
-            f"Input:\n{task.input_text}\n"
-            "Answer with label(s) only:\n"
+            "You are evaluating a classification decision.\n"
+            f"Input Text:\n{input_text}\n"
+            f"Allowed Labels: {list(allowed)}\n"
+            f"Multi-label: {multi_label}\n"
+            f"Candidate Prediction: {cand_display}"
+            f"{gold_part}\n"
+            "Assess correctness (if gold provided) and label suitability. Return JSON:\n"
+            "{ \"score\": <0-10>, \"reasoning\": \"...\", \"valid\": <true|false> }\n"
         )
 
-    def _prompt_ranking(self, task: RankingTask) -> str:
-        items = "\n".join(f"- {it}" for it in task.items)
-        criteria = f" according to: {task.criteria}" if task.criteria else ""
+    def _build_ranking_eval_prompt(
+        self,
+        items: List[str],
+        candidate: List[str],
+        criteria: Optional[str],
+        gold: Optional[List[str]],
+    ) -> str:
+        crit = f"Criteria: {criteria}\n" if criteria else ""
+        gold_part = f"Gold Ranking: {gold}\n" if gold else ""
         return (
-            f"Rank the following items{criteria} from best to worst.\n"
-            f"Items:\n{items}\n"
-            "Return the ordered list, one per line, top to bottom.\n"
+            "Evaluate a provided ranking of items.\n"
+            f"{crit}"
+            f"Items (unordered set): {items}\n"
+            f"Candidate Ranking: {candidate}\n"
+            f"{gold_part}"
+            "Judge coherence, adherence to criteria (if any), and plausibility.\n"
+            "Return JSON: { \"score\": 0-10, \"reasoning\": \"...\" }\n"
         )
 
-    def _parse_classification(
-        self, text: str, labels: Sequence[str], multi: bool
-    ) -> Union[str, Set[str]]:
-        lower = text.lower()
-        lbl_map = {l.lower(): l for l in labels}
-        found = []
-        for l in labels:
-            if l.lower() in lower:
-                found.append(lbl_map[l.lower()])
-        if multi:
-            return set(found)
-        # single-label: pick the earliest matched label; fallback to best fuzzy contains
-        if found:
-            return found[0]
-        # fallback: naive heuristic - choose label with maximum token overlap
-        tokens = set(lower.split())
-        best = None
-        best_score = -1
-        for l in labels:
-            score = len(set(l.lower().split()) & tokens)
-            if score > best_score:
-                best, best_score = l, score
-        return best or labels[0]
+    # --- Parsing / normalization helpers ---
 
-    def _parse_ranking(self, text: str, items: List[str]) -> List[str]:
-        lower = text.lower()
-        positions = []
-        for it in items:
-            idx = lower.find(it.lower())
-            positions.append((idx if idx >= 0 else 10_000_000, it))
-        positions.sort(key=lambda x: x[0])
-        ordered = [it for _, it in positions]
-        # If nothing matched, return original order
-        return ordered if any(p < 10_000_000 for p, _ in positions) else list(items)
+    def _extract_score_and_reason(self, text: str, extra: Optional[dict] = None) -> dict:
+        extra = extra or {}
+        # Try JSON first
+        json_match = re.search(r'\{.*\}', text, re.DOTALL)
+        if json_match:
+            blob = json_match.group(0)
+            try:
+                data = json.loads(blob)
+                score = self._coerce_score(data.get("score"))
+                reasoning = data.get("reasoning") or data.get("reason") or ""
+                data_norm = {
+                    "score": score,
+                    "reasoning": reasoning.strip(),
+                    **{k: v for k, v in data.items() if k not in ("score", "reasoning", "reason")},
+                    **extra,
+                }
+                return data_norm
+            except Exception:
+                pass
+        # Fallback: regex for "score"
+        score = None
+        m = re.search(r"score[^0-9]{0,10}(\d{1,2}(\.\d+)?)", text.lower())
+        if m:
+            score = self._coerce_score(m.group(1))
+        reasoning = text.strip()
+        return {"score": score, "reasoning": reasoning, **extra}
+
+    def _coerce_score(self, val: Any) -> Optional[float]:
+        if val is None:
+            return None
+        try:
+            f = float(val)
+            # Clamp to 0-10 if clearly in that band
+            if f < 0:
+                return 0.0
+            if f > 10 and f <= 100:  # maybe percent
+                return round(f / 10.0, 2)
+            if f > 10:
+                return 10.0
+            return round(f, 2)
+        except Exception:
+            return None
