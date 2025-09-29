@@ -30,7 +30,6 @@ class Judge:
 
         raise TypeError(f"Unsupported task type: {type(task)}")
 
-    # Prompt builders (simple, provider-agnostic)
     def _prompt_generation(self, task: GenerationTask) -> str:
         guidance = f"\nGuidance: {task.guidance}" if task.guidance else ""
         return (
@@ -58,7 +57,6 @@ class Judge:
             "Return the ordered list, one per line, top to bottom.\n"
         )
 
-    # Parsers (robust to extra text)
     def _parse_classification(
         self, text: str, labels: Sequence[str], multi: bool
     ) -> Union[str, Set[str]]:
